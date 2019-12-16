@@ -1,0 +1,99 @@
+
+    @packet.hpp:
+
+        În header-ul packet.hpp sunt definite constantele de verificare ACK și NACK, și, cel mai
+    important, o clasă care încapsulează mesajul de transmis și metadate: numărul pachetului,
+    dimensiunea mesajului, codul de verificare și hash-ul mesajului.
+
+        Metodele clasei:
+        - constructorul default creează un mesaj gol și cu lungimea 0
+        - celălalt constructor primește un obiect iterabil și mută conținutul acestuia în
+            payload-ul mesajului, împreună cu lungimea și numărul său, apoi calculează și
+            mută hash-ul mesajului la finalul payload-ului. Astfel, vor exista două (patru)
+            tipuri de mesaje:
+                1) mesaj cu (meta)date, având în payload un număr de identificare, apoi
+                    mesajul propriu-zis, apoi un hash, acestea fiind despărțite prin
+                    caractere '\0', pentru a putea fi tratate ca șiruri de caractere
+                    individuale
+                1*) primul mesaj va conține dimensiunea ferestrei, urmată de numele fișierului
+                        de ieșire (adică "recv_" + numele fișierului de intrare) și hash-ul
+                2) mesaj de verificare, având lungimea 1 și conținând în spațiul mesajului
+                    caracterul corespunzător operației de verificare (compararea hash-ului
+                    primit în pachet cu a celui calculat după primire pe baza conținutului)
+                2*) ultimul mesaj trimis de sender va fi unul de verificare și va conține doar ACK
+
+        - msg* data(): returnează un pointer la mesajul din pachet, deoarece funcțiile puse la
+                        dispoziție cer ca parametru un pointer la un obiect de tip msg
+        - void set_ack(const char& ack): setează codul de verificare al pachetului în payload
+                                            și lungimea 1
+        - size_t size(): returnează dimensiunea mesajului propriu-zis (a întregului pachet
+                            este constantă, MSGSIZE + sizeof(int), adică 1404)
+        - char* get_hash(): returnează (sub)șirul ce conține hash-ul pachetului
+        - string get_number(): returnează numărul pachetului sub formă de string
+        - char* get_message(): returnează (sub)șirul ce conține mesajul propriu-zis al pachetului
+        - size_t compute_hash(): calculează și returnează hash-ul mesajului
+        - bool is_corrupt(): verifică dacă pachetul este corupt, comparând hash-ul din pachet cu
+                                cel calculat pe baza mesajului
+        - bool verify(): verifică dacă pachetul conține codul ACK
+
+
+    @send.cpp:
+
+        În implementarea protocolului de transmitere prin fereastră glisantă mă folosesc de indicii
+    first_pack și last_pack pentru a defini fereastra. Astfel, first_pack este inițial 1, iar
+    last_pack va fi first_pack + dimensiunea ferestrei (window_size).
+        Înainte de toate, trimit un pachet cu metadate, de tipul 1*, de câte ori este nevoie, până
+    primesc confirmarea de la receiver, apoi, cât timp nu am epuizat conținutul fișierului de
+    intrare, execut algoritmul pentru fereastra glisantă.
+        La prima fereatră voi trimite succesiv mesajele cu indicii de la 1 la lățimea ferestrei,
+    apoi aștept confirmare pentru primul pachet. Dacă am primit confirmarea (și în timp util),
+    deplasez fereastra la dreapta cu o poziție (incrementând last_pack), altfel, va trebui
+    retrimis primul pachet din fereastră și evitat for-ul la următoarea ciclare, până când
+    pachetul va fi confirmat.
+        Pe măsură ce trimit pachete, folosesc un unordered_set<int> (verified_packs), implementat
+    cu hash-uri, pentru a reține indicii mesajelor confirmate, precum și un unordered_map<int>
+    (sent_packs), implementat în același mod, pentru a reține mesajele pachetelor trimise, în cazul
+    în care este necesară retrimiterea lor. Mă voi opri din trimis pachete atunci când dimensiunea
+    ultimului mesaj citit (length) este 0 (am terminat de citit din fișier) și dimensiunile celor
+    două structuri de date anterioare sunt egale (am primit confirmare pentru toate pachetele
+    trimise).
+        Dacă primul pachet din fereastra curentă este pierdut sau corupt, acesta va fi retrimis,
+    și, în condiția de la for(), mă asigur că nu vor fi trimise alte pachete până când cel așteptat
+    nu este confirmat. Abia atunci când va fi confirmat incrementez last_pack, astfel încât să
+    fie trimis următorul pachet. Dacă aș primi confirmare pentru oricare (și oricâte) pachet(e)
+    în afară de cel așteptat, tot nu voi deplasa fereastra, dar, după ce primesc confirmare și
+    pentru acel pachet, voi deplasa fereastra cu câte poziții este nevoie (pâna la window_size),
+    pentru a continua transmisia.
+        Pe de altă parte, chiar dacă dimensiunea datelor de intrare nu, acoperă neapărat o
+    fereastră întreagă calculată cu variabilele de la checker, nu mai execut operații inutile
+    trimițând pachete goale până umplu fereastra, ci mă opresc din trimis și doar aștept
+    confirmările (și retrimit pachetele existente, dacă este nevoie).
+        Funcția de hash folosită pentru validarea pachetelor este una foarte simplă, și, mesajele
+    având o dimesiune de maxim 1350 de octeți, riscul de coliziune este mic, mai ales că rezultatul
+    funcției este un număr pe 64 de biți, deci cu până la 20 de cifre.
+        La final, după ce ies din buclă, trimit un pachet ce conține ACK, pentru ca receiver-ul
+    să știe că transmisia de date s-a încheiat cu succes și să se oprească. Tot la final, apelez
+    și un sleep() de o secundă, pentru ca receiver-ul să aibă timp să scrie toate mesajele în
+    fișier și să se termine singur cu succes.
+
+
+    @recv.cpp:
+
+        Receiver-ul întâi primește pachetul cu metadate pentru a deschide fișierul de ieșire și
+    inițializa fereastra. Asemeni sender-ului și aici există first_pack și last_pack, cu aceeași
+    semnificație, doar că aici sunt primite (sau așteptate să fie primite) și nu trimise pachetele
+    cu acești indici. Totuși, aici mai folosesc și un indice auxiliar (expected_id) pentru a ști
+    care este numărul de ordine al mesajului pe care mă aștept la un moment dat să-l primesc
+    (util în cazurile de pierdere sau reordonare de pachete).
+        Bucla principală (do .. while) va cicla atâta timp cât mesajul primit nu este unul de
+    confirmare (adică cel de sfârșit). Primul for() este folosit pentru iterarea prin fereastă.
+    Pentru cazul în care este primit un pachet necorupt, dar nu este cel așteptat, folosesc o
+    structură auxiliară de tip map<int, string> (verified_packs), ordonată crescător și
+    implementată cu arbori binari echilibrați pentru a reține mesajele și a le pune în ordinea
+    numerelor de ordine. Pentru a mai reduce din dimensiunea map-ului, al doilea for verifică dacă
+    există blocuri de pachete consecutive, începând cu ultimul scris (last_printed), și le scrie în
+    fișier. Cazul ideal este atunci când întreaga fereastră se regăsește în map, dar, de exemplu,
+    dacă un mesaj (presupunem de la mijlocul ferestrei) lipsește, primele, totuși, pot fi scrise și
+    scoase din arbore.
+        După primirea mesajului de final, iterez prin arbore și scriu în fișier mesajele rămase,
+    adică cele care n-au fost primite în ordine.
